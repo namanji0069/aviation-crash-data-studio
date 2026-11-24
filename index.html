@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aviation Crash Data Studio</title>
+<style>
+:root{
+  --bg:#0c1624;--panel:#13233a;--panel2:#182c47;--line:#25405f;--ink:#e8eef6;--mute:#94a8c1;
+  --crash:#5db4ff;--fatal:#ffb347;--mil:#8fa8ff;--civ:#4fd1b5;--warn:#ff7a6b;
+  --radius:10px;color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --bg:#f2f5f9;--panel:#fff;--panel2:#eaf0f7;--line:#cfd9e6;--ink:#10202f;--mute:#566b82;
+  --crash:#1a73c8;--fatal:#c76a00;--mil:#4a5fd0;--civ:#0f8f78;--warn:#c0392b;color-scheme:light;
+}
+@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){
+  --bg:#f2f5f9;--panel:#fff;--panel2:#eaf0f7;--line:#cfd9e6;--ink:#10202f;--mute:#566b82;
+  --crash:#1a73c8;--fatal:#c76a00;--mil:#4a5fd0;--civ:#0f8f78;--warn:#c0392b;color-scheme:light;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif}
+.num,td.n,th.n{font-variant-numeric:tabular-nums}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+header{display:flex;flex-wrap:wrap;gap:12px 24px;justify-content:space-between;align-items:flex-start;margin-bottom:26px}
+h1{font-size:2.1rem;line-height:1.1;margin:0 0 8px;letter-spacing:-.02em;font-weight:700}
+.badge{display:inline-block;font-size:.85rem;color:var(--mute);border:1px solid var(--line);border-radius:999px;padding:4px 12px;background:var(--panel)}
+.badge b{color:var(--crash);font-weight:600}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid var(--crash);outline-offset:2px}
+.theme{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 12px;font-size:.85rem}
+#banner{display:none;border:1px solid var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--panel));border-radius:var(--radius);padding:16px 18px;margin-bottom:24px}
+#banner h2{margin:0 0 6px;font-size:1.05rem;color:var(--warn)}
+#banner p{margin:4px 0}
+code{background:var(--panel2);border-radius:5px;padding:2px 7px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.86em}
+#banner pre{margin:8px 0 0;background:var(--panel2);padding:10px 12px;border-radius:8px;overflow-x:auto;font-size:.86rem}
+section{margin-top:34px}
+h2.sec{font-size:1.25rem;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 14px;font-size:.92rem;max-width:70ch}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}
+.kpi .v{font-size:1.9rem;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpi .l{color:var(--mute);font-size:.88rem}
+.kpi.hot .v{color:var(--fatal)}.kpi.warn .v{color:var(--warn)}.kpi.ok .v{color:var(--civ)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.seg button{background:none;border:0;padding:7px 16px;font-size:.9rem;color:var(--mute);transition:background .2s,color .2s}
+.seg button[aria-pressed="true"],.tabs button[aria-selected="true"]{background:var(--panel2);color:var(--ink);font-weight:600}
+.bar-head{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;margin-bottom:14px}
+.chart{display:flex;align-items:flex-end;gap:clamp(4px,1.4vw,14px);height:240px;padding:20px 0 0;border-bottom:1px solid var(--line)}
+.col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0}
+.col .val{font-size:.74rem;color:var(--mute);margin-bottom:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.col .bar{width:100%;max-width:56px;border-radius:5px 5px 0 0;background:var(--accent);min-height:2px;transition:height .45s ease}
+.labels{display:flex;gap:clamp(4px,1.4vw,14px);padding-top:6px;font-size:.78rem;color:var(--mute)}
+.labels span{flex:1;text-align:center}
+.tbl{overflow-x:auto;margin-top:16px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600;font-size:.84rem}
+th.n,td.n{text-align:right}
+tbody tr:hover{background:var(--panel2)}
+td.wrapcell{white-space:normal;min-width:150px}
+.sectors{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.sector h3{margin:0 0 10px;font-size:1.05rem;display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--c)}
+.stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)}
+.stat:last-child{border:0}.stat span:first-child{color:var(--mute)}
+.share{margin-top:16px}
+.share p{margin:0 0 6px;font-size:.88rem;color:var(--mute)}
+.track{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--panel2);margin-bottom:6px}
+.track i{display:block;height:100%;transition:width .5s ease}
+.legend{display:flex;justify-content:space-between;font-size:.82rem;font-variant-numeric:tabular-nums}
+.tabs{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.tabs button{background:none;border:0;padding:8px 16px;color:var(--mute);transition:background .2s,color .2s}
+input[type=search]{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit;min-width:220px}
+.panel{animation:fade .25s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.meter{display:flex;align-items:center;gap:10px;min-width:170px}
+.meter .t{flex:1;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden}
+.meter .t i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.empty{padding:20px;color:var(--mute);text-align:center}
+.na{color:var(--mute);font-style:italic}
+.filter{display:grid;gap:12px}
+.fields{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+.fields label{display:flex;flex-direction:column;gap:4px;font-size:.84rem;color:var(--mute)}
+.fields input[type=number]{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;width:140px;font-variant-numeric:tabular-nums}
+.btn{background:var(--crash);color:var(--bg);border:0;border-radius:8px;padding:9px 16px;font-weight:600}
+.btn.ghost{background:var(--panel2);color:var(--ink);border:1px solid var(--line);font-weight:500}
+.btn:disabled{opacity:.6;cursor:wait}
+#fStatus{min-height:1.3em;font-size:.88rem;color:var(--mute)}
+#fStatus.ok{color:var(--civ)}#fStatus.err{color:var(--warn)}
+#fChip{display:inline-block;font-size:.82rem;border:1px solid var(--crash);color:var(--crash);border-radius:999px;padding:2px 10px}
+#fChip:empty{display:none}
+details#manual{font-size:.88rem;color:var(--mute)}
+details#manual summary{cursor:pointer}
+.cmd{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+footer{margin-top:40px;color:var(--mute);font-size:.82rem}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Aviation Crash Data Studio</h1>
+      <span class="badge">Parsing, anomaly auditing and sorting run in the C backend <b>(main.c)</b></span>
+    </div>
+    <button class="theme" id="themeBtn" type="button">Switch theme</button>
+  </header>
+
+  <div id="banner" role="alert">
+    <h2>Could not load dashboard_data.json</h2>
+    <p id="bannerMsg"></p>
+    <p>To fix this:</p>
+    <p>1. Run Option 8 (Export JSON for Web Frontend) in <code>./crash_studio</code> so <code>dashboard_data.json</code> is created next to this file.</p>
+    <p>2. Start a local server in that folder, because browsers block <code>fetch()</code> on <code>file://</code> pages:</p>
+    <pre>python3 serve.py              # static server plus live filtering
+# or, without filtering:
+python3 -m http.server 8000</pre>
+    <p>3. Open <code>http://localhost:8000</code> in your browser.</p>
+  </div>
+
+  <main id="app" hidden>
+    <form class="card filter" id="filterForm" style="margin-bottom:14px">
+      <div class="bar-head" style="margin:0">
+        <div>
+          <h2 class="sec" style="font-size:1.05rem">Data filter</h2>
+          <p class="sub" style="margin:0">Re-runs the C backend on a year range and minimum fatalities, then reloads every section below. Filtered views leave out records with an unknown year.</p>
+        </div>
+        <span id="fChip"></span>
+      </div>
+      <div class="fields">
+        <label>Start year<input type="number" id="fStart" value="1900" min="1900" max="2100"></label>
+        <label>End year<input type="number" id="fEnd" value="2026" min="1900" max="2100"></label>
+        <label>Minimum fatalities<input type="number" id="fMin" value="0" min="0"></label>
+        <button class="btn" type="submit" id="fApply">Apply filter</button>
+        <button class="btn ghost" type="button" id="fReset">Show full dataset</button>
+        <button class="btn ghost" type="button" id="fReload">Reload data</button>
+      </div>
+      <div id="fStatus" role="status"></div>
+      <details id="manual">
+        <summary>Run it from the terminal instead</summary>
+        <div class="cmd"><code id="fCmd"></code><button class="btn ghost" type="button" id="fCopy">Copy</button></div>
+        <p style="margin:8px 0 0">Run this in the folder with the CSV, then click Reload data.</p>
+      </details>
+    </form>
+    <div class="kpis" id="kpis"></div>
+
+    <section>
+      <div class="bar-head">
+        <div>
+          <h2 class="sec">Decade trend</h2>
+          <p class="sub" style="margin:0">Recorded crashes and fatalities per decade.</p>
+        </div>
+        <div class="seg" role="group" aria-label="Chart metric">
+          <button type="button" data-m="crashes" aria-pressed="true">Crashes</button>
+          <button type="button" data-m="fatalities" aria-pressed="false">Fatalities</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="chart" id="chart"></div>
+        <div class="labels" id="chartLabels"></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Decade</th><th class="n">Crashes</th><th class="n">Aboard</th><th class="n">Fatalities</th><th class="n">Fatality rate</th></tr></thead>
+          <tbody id="decBody"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="sec">Military vs. commercial / civil</h2>
+      <p class="sub">Operators matching military keywords (air force, navy, army, military) are counted as military; everything else is civil.</p>
+      <div class="sectors" id="sectors"></div>
+    </section>
+
+    <section>
+      <div class="bar-head">
+        <div>
+          <h2 class="sec">Top 10 rankings</h2>
+          <p class="sub" style="margin:0">Ranked by crash count. Bars show crashes relative to the leader.</p>
+        </div>
+      </div>
+      <div class="bar-head">
+        <div class="tabs" role="tablist" id="tabs">
+          <button type="button" role="tab" data-k="top_operators" aria-selected="true">Operators</button>
+          <button type="button" role="tab" data-k="top_aircraft" aria-selected="false">Aircraft types</button>
+          <button type="button" role="tab" data-k="top_locations" aria-selected="false">Locations</button>
+        </div>
+        <input type="search" id="filter" placeholder="Filter this list" aria-label="Filter rankings">
+      </div>
+      <div class="card panel" id="rankPanel" style="padding:6px 8px">
+        <div class="tbl" style="margin:0"><table>
+          <thead><tr><th class="n">Rank</th><th id="rankName">Operator</th><th>Crashes</th><th class="n">Fatalities</th></tr></thead>
+          <tbody id="rankBody"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="sec">Top 10 deadliest incidents</h2>
+      <p class="sub">Sorted by fatalities. Unknown values show as N/A.</p>
+      <div class="card" style="padding:6px 8px"><div class="tbl" style="margin:0"><table>
+        <thead><tr><th class="n">Rank</th><th>Date</th><th>Operator</th><th>Aircraft</th><th>Location</th><th class="n">Aboard</th><th class="n">Fatalities</th></tr></thead>
+        <tbody id="deadBody"></tbody>
+      </table></div></div>
+    </section>
+
+    <footer>Data comes from <code>dashboard_data.json</code>, generated by the C program.</footer>
+  </main>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){return document.getElementById(id)};
+  var fmt = function(v){return (typeof v==="number" && v>=0 && isFinite(v)) ? v.toLocaleString("en-US") : null};
+  var esc = function(s){var d=document.createElement("div");d.textContent=(s==null||s==="")?"N/A":String(s);return d.innerHTML};
+  var numCell = function(v){var f=fmt(v);return f===null?'<span class="na">N/A</span>':f};
+  var pct = function(a,b){return b>0?(a/b*100).toFixed(1)+"%":"N/A"};
+  var data, metric="crashes", tab="top_operators";
+
+  /* Theme */
+  var root=document.documentElement;
+  $("themeBtn").addEventListener("click",function(){
+    var light = root.dataset.theme ? root.dataset.theme==="light" : matchMedia("(prefers-color-scheme:light)").matches;
+    root.dataset.theme = light ? "dark" : "light";
+  });
+
+  /* Load */
+  function load(){
+    return fetch("./dashboard_data.json",{cache:"no-store"})
+      .then(function(r){ if(!r.ok) throw new Error("Server returned HTTP "+r.status+"."); return r.json(); })
+      .then(function(j){ data=j; $("banner").style.display="none"; render(); });
+  }
+  load().catch(function(e){
+    $("bannerMsg").textContent = location.protocol==="file:"
+      ? "This page was opened from a file:// address, so the browser blocked the request."
+      : (e && e.message ? e.message : "The file could not be read.");
+    $("banner").style.display="block";
+  });
+
+  /* Data filter: calls the C backend through serve.py */
+  function setStatus(t,k){ var el=$("fStatus"); el.textContent=t; el.className=k||""; }
+  function readFilter(){
+    var s=Number($("fStart").value), e=Number($("fEnd").value), m=Number($("fMin").value);
+    if(![s,e,m].every(Number.isInteger)) return null;
+    return {s:s,e:e,m:m};
+  }
+  function showCmd(){
+    var f=readFilter();
+    $("fCmd").textContent = f ? "./crash_studio --filter "+f.s+" "+f.e+" "+f.m : "Enter whole numbers in all three fields.";
+  }
+  ["fStart","fEnd","fMin"].forEach(function(id){ $(id).addEventListener("input",showCmd); });
+  showCmd();
+
+  function runBackend(qs,label){
+    var btns=document.querySelectorAll("#filterForm .btn");
+    btns.forEach(function(b){b.disabled=true});
+    setStatus("Running the C backend...");
+    return fetch("/api/filter?"+qs,{cache:"no-store"})
+      .then(function(r){ return r.json().then(function(j){ return [r,j]; }); })
+      .then(function(a){
+        if(!a[0].ok||!a[1].ok) throw new Error(a[1].error||"The backend reported an error.");
+        return load();
+      })
+      .then(function(){ $("fChip").textContent=label; setStatus("Dashboard updated.","ok"); })
+      .catch(function(e){
+        if(e instanceof SyntaxError || e instanceof TypeError){
+          setStatus("Live filtering needs serve.py. Start it with python3 serve.py, or run the command below yourself and click Reload data.","err");
+          $("manual").open=true;
+        } else setStatus(e.message,"err");
+      })
+      .then(function(){ btns.forEach(function(b){b.disabled=false}); });
+  }
+  $("filterForm").addEventListener("submit",function(ev){
+    ev.preventDefault();
+    var f=readFilter();
+    if(!f) return setStatus("Enter whole numbers in all three fields.","err");
+    if(f.s>f.e) return setStatus("Start year must not be after end year.","err");
+    if(f.m<0) return setStatus("Minimum fatalities cannot be negative.","err");
+    runBackend("start="+f.s+"&end="+f.e+"&min="+f.m, f.s+" to "+f.e+(f.m>0?", at least "+f.m+" fatalities":""));
+  });
+  $("fReset").addEventListener("click",function(){
+    $("fStart").value=1900; $("fEnd").value=2026; $("fMin").value=0; showCmd();
+    runBackend("reset=1","").then(function(){ if($("fStatus").className==="ok") setStatus("Showing the full dataset.","ok"); });
+  });
+  $("fReload").addEventListener("click",function(){
+    setStatus("Reloading...");
+    load().then(function(){ setStatus("Reloaded dashboard_data.json.","ok"); })
+      .catch(function(e){ setStatus(e.message||"Could not reload.","err"); });
+  });
+  $("fCopy").addEventListener("click",function(){
+    try{ navigator.clipboard.writeText($("fCmd").textContent); setStatus("Command copied.","ok"); }
+    catch(e){ setStatus("Select the command and copy it manually.","err"); }
+  });
+
+  function render(){
+    $("app").hidden=false;
+    renderKpis(); renderDecades(); renderSectors(); renderRank(); renderDeadliest();
+  }
+
+  function renderKpis(){
+    var k=data.kpis, items=[
+      ["Total records", fmt(k.total_records), ""],
+      ["Known aboard", fmt(k.total_aboard), ""],
+      ["Known fatalities", fmt(k.total_fatalities), "hot"],
+      ["Overall fatality rate", (typeof k.fatality_rate==="number"?k.fatality_rate.toFixed(2):"N/A")+"%", "hot"],
+      ["Flagged audit issues", fmt(k.flagged_issues), "warn"],
+      ["100% survival incidents", fmt(k.zero_fatality_crashes), "ok"]
+    ];
+    $("kpis").innerHTML = items.map(function(i){
+      return '<div class="card kpi '+i[2]+'"><div class="v">'+esc(i[1])+'</div><div class="l">'+i[0]+'</div></div>';
+    }).join("");
+  }
+
+  function renderDecades(){
+    var d=data.decades||[], max=Math.max.apply(null,d.map(function(x){return x[metric]||0}).concat(1));
+    var accent = metric==="crashes" ? "var(--crash)" : "var(--fatal)";
+    $("chart").innerHTML = d.map(function(x){
+      var v=x[metric]||0, h=Math.max(v/max*100,0.8);
+      return '<div class="col" title="'+esc(x.decade)+': '+v.toLocaleString("en-US")+' '+metric+'"><div class="val">'+v.toLocaleString("en-US")+'</div><div class="bar" style="--accent:'+accent+';height:'+h+'%"></div></div>';
+    }).join("");
+    $("chartLabels").innerHTML = d.map(function(x){return "<span>"+esc(x.decade)+"</span>"}).join("");
+    if(!d.length) $("chart").innerHTML='<div class="empty" style="margin:auto">No records match this filter.</div>';
+    $("decBody").innerHTML = d.map(function(x){
+      return "<tr><td>"+esc(x.decade)+'</td><td class="n">'+numCell(x.crashes)+'</td><td class="n">'+numCell(x.aboard)+'</td><td class="n">'+numCell(x.fatalities)+'</td><td class="n">'+pct(x.fatalities,x.aboard)+"</td></tr>";
+    }).join("");
+  }
+  document.querySelectorAll(".seg button").forEach(function(b){
+    b.addEventListener("click",function(){
+      metric=b.dataset.m;
+      document.querySelectorAll(".seg button").forEach(function(o){o.setAttribute("aria-pressed",o===b)});
+      renderDecades();
+    });
+  });
+
+  function renderSectors(){
+    var m=data.sectors.military, c=data.sectors.civil;
+    var tc=m.crashes+c.crashes, tf=m.fatalities+c.fatalities;
+    function card(name,s,color){
+      return '<div class="card sector" style="--c:'+color+'"><h3><span class="dot"></span>'+name+'</h3>'+
+        '<div class="stat"><span>Crashes</span><b class="num">'+numCell(s.crashes)+'</b></div>'+
+        '<div class="stat"><span>Fatalities</span><b class="num">'+numCell(s.fatalities)+'</b></div>'+
+        '<div class="stat"><span>Share of all crashes</span><b class="num">'+pct(s.crashes,tc)+'</b></div>'+
+        '<div class="stat"><span>Share of all fatalities</span><b class="num">'+pct(s.fatalities,tf)+'</b></div>'+
+        '<div class="stat"><span>Average fatalities per crash</span><b class="num">'+(s.crashes>0?(s.fatalities/s.crashes).toFixed(1):"N/A")+'</b></div></div>';
+    }
+    function share(title,a,b){
+      var pa=(a+b)>0?a/(a+b)*100:0;
+      return '<div class="share"><p>'+title+'</p><div class="track"><i style="width:'+pa+'%;background:var(--mil)"></i><i style="width:'+(100-pa)+'%;background:var(--civ)"></i></div>'+
+        '<div class="legend"><span style="color:var(--mil)">Military '+pa.toFixed(1)+'%</span><span style="color:var(--civ)">Civil '+(100-pa).toFixed(1)+'%</span></div></div>';
+    }
+    $("sectors").innerHTML = card("Military",m,"var(--mil)")+card("Commercial / civil",c,"var(--civ)")+
+      '<div class="card" style="grid-column:1/-1">'+share("Share of crashes",m.crashes,c.crashes)+share("Share of fatalities",m.fatalities,c.fatalities)+'</div>';
+  }
+
+  function renderRank(){
+    var list=(data[tab]||[]), q=$("filter").value.trim().toLowerCase();
+    var max=Math.max.apply(null,list.map(function(x){return x.crashes}).concat(1));
+    var rows=list.map(function(x,i){return {x:x,r:i+1}}).filter(function(o){return !q||String(o.x.name).toLowerCase().indexOf(q)>-1});
+    var accent = tab==="top_operators"?"var(--crash)":tab==="top_aircraft"?"var(--civ)":"var(--fatal)";
+    $("rankName").textContent = tab==="top_operators"?"Operator":tab==="top_aircraft"?"Aircraft type":"Location";
+    $("rankBody").innerHTML = rows.length ? rows.map(function(o){
+      return '<tr><td class="n">'+o.r+'</td><td class="wrapcell">'+esc(o.x.name)+'</td><td><div class="meter" style="--accent:'+accent+'"><span class="num" style="min-width:3ch;text-align:right">'+numCell(o.x.crashes)+'</span><span class="t"><i style="width:'+(o.x.crashes/max*100)+'%"></i></span></div></td><td class="n">'+numCell(o.x.fatalities)+'</td></tr>';
+    }).join("") : '<tr><td colspan="4" class="empty">'+(list.length?'No entries match "'+esc($("filter").value)+'".':"No records match the current data filter.")+'</td></tr>';
+  }
+  $("filter").addEventListener("input",renderRank);
+  document.querySelectorAll("#tabs button").forEach(function(b){
+    b.addEventListener("click",function(){
+      tab=b.dataset.k;
+      document.querySelectorAll("#tabs button").forEach(function(o){o.setAttribute("aria-selected",o===b)});
+      var p=$("rankPanel"); p.classList.remove("panel"); void p.offsetWidth; p.classList.add("panel");
+      renderRank();
+    });
+  });
+
+  function renderDeadliest(){
+    if(!(data.deadliest||[]).length){ $("deadBody").innerHTML='<tr><td colspan="7" class="empty">No incidents match the current data filter.</td></tr>'; return; }
+    $("deadBody").innerHTML=(data.deadliest||[]).map(function(x,i){
+      return '<tr><td class="n">'+(i+1)+'</td><td>'+esc(x.date)+'</td><td class="wrapcell">'+esc(x.operator)+'</td><td class="wrapcell">'+esc(x.aircraft)+'</td><td class="wrapcell">'+esc(x.location)+'</td><td class="n">'+numCell(x.aboard)+'</td><td class="n"><b>'+numCell(x.fatalities)+'</b></td></tr>';
+    }).join("");
+  }
+})();
+</script>
+</body>
+</html>

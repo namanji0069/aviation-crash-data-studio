@@ -1,0 +1,20 @@
+# Compiled C binary
+crash_studio
+crash_studio.exe
+*.o
+*.dSYM/
+
+# Generated analytical reports & exports
+dashboard_data.json
+filtered_crashes.csv
+cleaned_crashes.csv
+issues_log.txt
+trend_report.txt
+top_summary.txt
+spotlight_report.txt
+sector_report.txt
+
+# Python cache & macOS metadata
+__pycache__/
+*.py[cod]
+.DS_Store
