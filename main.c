@@ -23,6 +23,7 @@ typedef struct {
     char location[160];
     char operator_name[160];
     char aircraft[160];
+    char cause[96];
     int aboard;     /* -1 if missing/invalid */
     int fatalities; /* -1 if missing/invalid */
     int ground;     /* -1 if missing/invalid */
@@ -32,7 +33,16 @@ typedef struct {
     char label[160];
     int crashes;
     long long fatalities;
+    long long survivors;
 } SummaryItem;
+
+typedef struct {
+    int year;
+    int crashes;
+    long long aboard;
+    long long fatalities;
+    long long survivors;
+} AnnualStat;
 
 static void strip_newline(char *s) {
     s[strcspn(s, "\r\n")] = '\0';
@@ -50,6 +60,57 @@ static void trim_spaces(char *s) {
     if (start > 0) {
         memmove(s, s + start, strlen(s + start) + 1);
     }
+}
+
+/* Collapse repeated spaces and normalize spacing around hyphens/slashes */
+static void normalize_label(const char *src, char *dst, size_t dst_size) {
+    if (!src || src[0] == '\0' || dst_size == 0) {
+        if (dst_size > 0) snprintf(dst, dst_size, "Unknown");
+        return;
+    }
+    char tmp[MAX_FIELD];
+    size_t tpos = 0;
+    int prev_space = 0;
+
+    for (size_t i = 0; src[i] != '\0' && tpos + 3 < sizeof(tmp); i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (isspace(c)) {
+            if (!prev_space && tpos > 0) {
+                tmp[tpos++] = ' ';
+                prev_space = 1;
+            }
+        } else if (c == '-' || c == '/') {
+            while (tpos > 0 && tmp[tpos - 1] == ' ') tpos--;
+            tmp[tpos++] = ' ';
+            tmp[tpos++] = (char)c;
+            tmp[tpos++] = ' ';
+            prev_space = 1;
+        } else {
+            tmp[tpos++] = (char)c;
+            prev_space = 0;
+        }
+    }
+    tmp[tpos] = '\0';
+
+    /* Collapse any multiple spaces created around punctuation */
+    char clean[MAX_FIELD];
+    size_t cpos = 0;
+    prev_space = 0;
+    for (size_t i = 0; tmp[i] != '\0' && cpos + 1 < sizeof(clean); i++) {
+        unsigned char c = (unsigned char)tmp[i];
+        if (isspace(c)) {
+            if (!prev_space && cpos > 0) {
+                clean[cpos++] = ' ';
+                prev_space = 1;
+            }
+        } else {
+            clean[cpos++] = (char)c;
+            prev_space = 0;
+        }
+    }
+    clean[cpos] = '\0';
+    trim_spaces(clean);
+    snprintf(dst, dst_size, "%s", clean[0] ? clean : "Unknown");
 }
 
 static void clear_stdin_line(void) {
@@ -109,14 +170,15 @@ static int extract_year(const char *date_str) {
             isdigit((unsigned char)date_str[i + 2]) &&
             isdigit((unsigned char)date_str[i + 3])) {
             int y = atoi(date_str + i);
-            if (y >= 1900 && y <= 2026) return y;
+            if (y >= 1900 && y <= 2100) return y;
         }
     }
     return -1;
 }
 
 static int contains_case_insensitive(const char *haystack, const char *needle) {
-    if (!haystack || !needle || needle[0] == '\0') return 0;
+    if (!needle || needle[0] == '\0') return 1;
+    if (!haystack || haystack[0] == '\0') return 0;
     size_t n_len = strlen(needle);
     for (size_t i = 0; haystack[i] != '\0'; i++) {
         size_t j = 0;
@@ -136,7 +198,53 @@ static int is_military_operator(const char *op) {
            contains_case_insensitive(op, "u.s. navy") ||
            contains_case_insensitive(op, "u.s. army") ||
            contains_case_insensitive(op, "royal air force") ||
-           contains_case_insensitive(op, "indian air force");
+           contains_case_insensitive(op, "indian air force") ||
+           contains_case_insensitive(op, "luftwaffe") ||
+           contains_case_insensitive(op, "coast guard");
+}
+
+static void classify_cause_from_text(const char *text, char *dst, size_t dst_size) {
+    const char *label = "Other / Undetermined";
+    if (text && text[0] != '\0') {
+        if (contains_case_insensitive(text, "shot down") ||
+            contains_case_insensitive(text, "missile") ||
+            contains_case_insensitive(text, "hijack") ||
+            contains_case_insensitive(text, "bomb") ||
+            contains_case_insensitive(text, "sabotage")) {
+            label = "Hostile Action / Security";
+        } else if (contains_case_insensitive(text, "weather") ||
+                   contains_case_insensitive(text, "fog") ||
+                   contains_case_insensitive(text, "storm") ||
+                   contains_case_insensitive(text, "icing") ||
+                   contains_case_insensitive(text, "snow") ||
+                   contains_case_insensitive(text, "rain")) {
+            label = "Weather / Icing / Visibility";
+        } else if (contains_case_insensitive(text, "engine") ||
+                   contains_case_insensitive(text, "mechanical") ||
+                   contains_case_insensitive(text, "fuel") ||
+                   contains_case_insensitive(text, "propeller") ||
+                   contains_case_insensitive(text, "fire")) {
+            label = "Mechanical / Engine / Fire";
+        } else if (contains_case_insensitive(text, "mountain") ||
+                   contains_case_insensitive(text, "terrain") ||
+                   contains_case_insensitive(text, "hill") ||
+                   contains_case_insensitive(text, "sea") ||
+                   contains_case_insensitive(text, "ocean")) {
+            label = "Terrain / Water Impact";
+        } else if (contains_case_insensitive(text, "takeoff") ||
+                   contains_case_insensitive(text, "landing") ||
+                   contains_case_insensitive(text, "approach") ||
+                   contains_case_insensitive(text, "runway")) {
+            label = "Takeoff / Approach / Landing";
+        }
+    }
+    snprintf(dst, dst_size, "%s", label);
+}
+
+static long long calc_survivors(const CrashRecord *r) {
+    int ab = (r->aboard >= 0) ? r->aboard : 0;
+    int ft = (r->fatalities >= 0) ? r->fatalities : 0;
+    return (ab > ft) ? (long long)(ab - ft) : 0LL;
 }
 
 static void csv_escape(const char *src, char *dst, size_t dst_size) {
@@ -222,13 +330,18 @@ CrashRecord *load_records(const char *filename, size_t *out_count) {
         memset(&r, 0, sizeof(r));
         r.line_no = line_no;
         snprintf(r.date, sizeof(r.date), "%s", fields[COL_DATE]);
-        snprintf(r.location, sizeof(r.location), "%s", fields[COL_LOC]);
-        snprintf(r.operator_name, sizeof(r.operator_name), "%s", fields[COL_OP]);
-        snprintf(r.aircraft, sizeof(r.aircraft), "%s", fields[COL_AC]);
+        normalize_label(fields[COL_LOC], r.location, sizeof(r.location));
+        normalize_label(fields[COL_OP], r.operator_name, sizeof(r.operator_name));
+        normalize_label(fields[COL_AC], r.aircraft, sizeof(r.aircraft));
         r.aboard = parse_non_neg_int(fields[COL_ABOARD]);
         r.fatalities = parse_non_neg_int(fields[COL_FATAL]);
         r.ground = (n_cols > COL_GROUND) ? parse_non_neg_int(fields[COL_GROUND]) : -1;
         r.year = extract_year(r.date);
+
+        char combined_clue[MAX_FIELD];
+        snprintf(combined_clue, sizeof(combined_clue), "%s %s %s",
+                 r.location, r.operator_name, r.aircraft);
+        classify_cause_from_text(combined_clue, r.cause, sizeof(r.cause));
 
         records[count++] = r;
     }
@@ -308,18 +421,22 @@ void decade_report(const CrashRecord *records, size_t count) {
     int crashes[13] = {0};
     long long aboard_sum[13] = {0};
     long long fatal_sum[13] = {0};
-    long long total_aboard = 0, total_fatal = 0;
+    long long surv_sum[13] = {0};
+    long long total_aboard = 0, total_fatal = 0, total_surv = 0;
 
     for (size_t i = 0; i < count; i++) {
         const CrashRecord *r = &records[i];
+        long long sv = calc_survivors(r);
         if (r->aboard >= 0) total_aboard += r->aboard;
         if (r->fatalities >= 0) total_fatal += r->fatalities;
+        total_surv += sv;
 
         if (r->year >= 1900 && r->year <= 2029) {
             int idx = (r->year - 1900) / 10;
             crashes[idx]++;
             if (r->aboard >= 0) aboard_sum[idx] += r->aboard;
             if (r->fatalities >= 0) fatal_sum[idx] += r->fatalities;
+            surv_sum[idx] += sv;
         }
     }
 
@@ -332,13 +449,14 @@ void decade_report(const CrashRecord *records, size_t count) {
     fprintf(rp, "Total Records   : %zu\n", count);
     fprintf(rp, "Total Aboard    : %lld\n", total_aboard);
     fprintf(rp, "Total Fatalities: %lld\n", total_fatal);
+    fprintf(rp, "Total Survivors : %lld\n", total_surv);
     fprintf(rp, "Fatality Rate   : %.2f%%\n\n", overall_rate);
-    fprintf(rp, "%-8s %-10s %-12s %-12s %-10s\n",
-            "Decade", "Crashes", "Aboard", "Fatalities", "Rate (%)");
+    fprintf(rp, "%-8s %-10s %-12s %-12s %-12s %-10s\n",
+            "Decade", "Crashes", "Aboard", "Fatalities", "Survivors", "Rate (%)");
 
-    printf("\n%-8s %-10s %-12s %-12s %-10s\n",
-           "Decade", "Crashes", "Aboard", "Fatalities", "Rate (%)");
-    printf("--------------------------------------------------------\n");
+    printf("\n%-8s %-10s %-12s %-12s %-12s %-10s\n",
+           "Decade", "Crashes", "Aboard", "Fatalities", "Survivors", "Rate (%)");
+    printf("--------------------------------------------------------------------\n");
 
     for (int i = 0; i < 13; i++) {
         if (crashes[i] > 0) {
@@ -349,10 +467,10 @@ void decade_report(const CrashRecord *records, size_t count) {
             char label[16];
             snprintf(label, sizeof(label), "%ds", start_yr);
 
-            printf("%-8s %-10d %-12lld %-12lld %-10.2f\n",
-                   label, crashes[i], aboard_sum[i], fatal_sum[i], rate);
-            fprintf(rp, "%-8s %-10d %-12lld %-12lld %-10.2f\n",
-                    label, crashes[i], aboard_sum[i], fatal_sum[i], rate);
+            printf("%-8s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+                   label, crashes[i], aboard_sum[i], fatal_sum[i], surv_sum[i], rate);
+            fprintf(rp, "%-8s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+                    label, crashes[i], aboard_sum[i], fatal_sum[i], surv_sum[i], rate);
         }
     }
 
@@ -375,12 +493,20 @@ static int cmp_record_fatal_desc(const void *a, const void *b) {
     return y->aboard - x->aboard;
 }
 
-static void add_to_summary(SummaryItem **list, size_t *len, size_t *cap, const char *label, int fat) {
+static int cmp_annual_asc(const void *a, const void *b) {
+    const AnnualStat *x = (const AnnualStat *)a;
+    const AnnualStat *y = (const AnnualStat *)b;
+    return x->year - y->year;
+}
+
+static void add_to_summary(SummaryItem **list, size_t *len, size_t *cap,
+                           const char *label, int fat, long long surv) {
     const char *clean_label = (label && label[0] != '\0') ? label : "Unknown";
     for (size_t i = 0; i < *len; i++) {
         if (strcmp((*list)[i].label, clean_label) == 0) {
             (*list)[i].crashes++;
             if (fat >= 0) (*list)[i].fatalities += fat;
+            (*list)[i].survivors += surv;
             return;
         }
     }
@@ -395,6 +521,7 @@ static void add_to_summary(SummaryItem **list, size_t *len, size_t *cap, const c
     snprintf(item.label, sizeof(item.label), "%s", clean_label);
     item.crashes = 1;
     item.fatalities = (fat >= 0) ? fat : 0;
+    item.survivors = surv;
     (*list)[(*len)++] = item;
 }
 
@@ -417,14 +544,16 @@ void search_and_operators(const CrashRecord *records, size_t count) {
         SummaryItem *ops = NULL;
         size_t n_ops = 0, cap_ops = 0;
         for (size_t i = 0; i < count; i++) {
-            add_to_summary(&ops, &n_ops, &cap_ops, records[i].operator_name, records[i].fatalities);
+            add_to_summary(&ops, &n_ops, &cap_ops, records[i].operator_name,
+                           records[i].fatalities, calc_survivors(&records[i]));
         }
         qsort(ops, n_ops, sizeof(SummaryItem), cmp_summary_desc);
-        printf("\n%-36s %-10s %-12s\n", "Operator", "Crashes", "Fatalities");
-        printf("------------------------------------------------------------\n");
+        printf("\n%-36s %-10s %-12s %-12s\n", "Operator", "Crashes", "Fatalities", "Survivors");
+        printf("------------------------------------------------------------------------\n");
         size_t limit = (n_ops < 10) ? n_ops : 10;
         for (size_t i = 0; i < limit; i++) {
-            printf("%-36.36s %-10d %-12lld\n", ops[i].label, ops[i].crashes, ops[i].fatalities);
+            printf("%-36.36s %-10d %-12lld %-12lld\n",
+                   ops[i].label, ops[i].crashes, ops[i].fatalities, ops[i].survivors);
         }
         free(ops);
         return;
@@ -481,7 +610,7 @@ void search_and_operators(const CrashRecord *records, size_t count) {
 
 /* Feature 4: Filter by min fatalities & year range + export CSV */
 void filter_and_export(const CrashRecord *records, size_t count) {
-    int min_fatal = 0, start_yr = 1900, end_yr = 2026;
+    int min_fatal = 0, start_yr = 1900, end_yr = 2100;
     printf("Minimum fatalities (0 for any): ");
     if (scanf("%d", &min_fatal) != 1) { clear_stdin_line(); return; }
     printf("Start year (e.g., 1980): ");
@@ -523,8 +652,9 @@ void top_aircraft_and_locations(const CrashRecord *records, size_t count) {
     size_t n_ac = 0, cap_ac = 0, n_loc = 0, cap_loc = 0;
 
     for (size_t i = 0; i < count; i++) {
-        add_to_summary(&ac, &n_ac, &cap_ac, records[i].aircraft, records[i].fatalities);
-        add_to_summary(&locs, &n_loc, &cap_loc, records[i].location, records[i].fatalities);
+        long long sv = calc_survivors(&records[i]);
+        add_to_summary(&ac, &n_ac, &cap_ac, records[i].aircraft, records[i].fatalities, sv);
+        add_to_summary(&locs, &n_loc, &cap_loc, records[i].location, records[i].fatalities, sv);
     }
 
     qsort(ac, n_ac, sizeof(SummaryItem), cmp_summary_desc);
@@ -560,13 +690,15 @@ void top_aircraft_and_locations(const CrashRecord *records, size_t count) {
 
 /* Feature 6: Deadliest Crashes & 100% Survival Spotlight */
 void deadliest_and_survival_spotlight(const CrashRecord *records, size_t count) {
-    CrashRecord *copy = malloc(count * sizeof(CrashRecord));
+    CrashRecord *copy = malloc((count > 0 ? count : 1) * sizeof(CrashRecord));
     if (!copy) {
         perror("Memory allocation failed");
         return;
     }
-    memcpy(copy, records, count * sizeof(CrashRecord));
-    qsort(copy, count, sizeof(CrashRecord), cmp_record_fatal_desc);
+    if (count > 0) {
+        memcpy(copy, records, count * sizeof(CrashRecord));
+        qsort(copy, count, sizeof(CrashRecord), cmp_record_fatal_desc);
+    }
 
     int zero_fatal_count = 0;
     long long zero_fatal_saved = 0;
@@ -619,17 +751,21 @@ void military_vs_commercial(const CrashRecord *records, size_t count) {
     int mil_crashes = 0, civ_crashes = 0;
     long long mil_aboard = 0, civ_aboard = 0;
     long long mil_fatal = 0, civ_fatal = 0;
+    long long mil_surv = 0, civ_surv = 0;
 
     for (size_t i = 0; i < count; i++) {
         const CrashRecord *r = &records[i];
+        long long sv = calc_survivors(r);
         if (is_military_operator(r->operator_name)) {
             mil_crashes++;
             if (r->aboard >= 0) mil_aboard += r->aboard;
             if (r->fatalities >= 0) mil_fatal += r->fatalities;
+            mil_surv += sv;
         } else {
             civ_crashes++;
             if (r->aboard >= 0) civ_aboard += r->aboard;
             if (r->fatalities >= 0) civ_fatal += r->fatalities;
+            civ_surv += sv;
         }
     }
 
@@ -637,51 +773,104 @@ void military_vs_commercial(const CrashRecord *records, size_t count) {
     double civ_rate = (civ_aboard > 0) ? ((double)civ_fatal / (double)civ_aboard) * 100.0 : 0.0;
 
     printf("\nSECTOR COMPARISON: MILITARY VS. COMMERCIAL / CIVIL\n");
-    printf("-------------------------------------------------------------\n");
-    printf("%-22s %-10s %-12s %-12s %-10s\n", "Sector", "Crashes", "Aboard", "Fatalities", "Rate (%)");
-    printf("%-22s %-10d %-12lld %-12lld %-10.2f\n",
-           "Military", mil_crashes, mil_aboard, mil_fatal, mil_rate);
-    printf("%-22s %-10d %-12lld %-12lld %-10.2f\n",
-           "Commercial / Civil", civ_crashes, civ_aboard, civ_fatal, civ_rate);
+    printf("-------------------------------------------------------------------------\n");
+    printf("%-22s %-10s %-12s %-12s %-12s %-10s\n",
+           "Sector", "Crashes", "Aboard", "Fatalities", "Survivors", "Rate (%)");
+    printf("%-22s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+           "Military", mil_crashes, mil_aboard, mil_fatal, mil_surv, mil_rate);
+    printf("%-22s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+           "Commercial / Civil", civ_crashes, civ_aboard, civ_fatal, civ_surv, civ_rate);
 
     FILE *fp = fopen("sector_report.txt", "w");
     if (fp) {
         fprintf(fp, "SECTOR COMPARISON: MILITARY VS. COMMERCIAL / CIVIL\n");
-        fprintf(fp, "-------------------------------------------------------------\n");
-        fprintf(fp, "%-22s %-10s %-12s %-12s %-10s\n", "Sector", "Crashes", "Aboard", "Fatalities", "Rate (%)");
-        fprintf(fp, "%-22s %-10d %-12lld %-12lld %-10.2f\n",
-                "Military", mil_crashes, mil_aboard, mil_fatal, mil_rate);
-        fprintf(fp, "%-22s %-10d %-12lld %-12lld %-10.2f\n",
-                "Commercial / Civil", civ_crashes, civ_aboard, civ_fatal, civ_rate);
+        fprintf(fp, "-------------------------------------------------------------------------\n");
+        fprintf(fp, "%-22s %-10s %-12s %-12s %-12s %-10s\n",
+                "Sector", "Crashes", "Aboard", "Fatalities", "Survivors", "Rate (%)");
+        fprintf(fp, "%-22s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+                "Military", mil_crashes, mil_aboard, mil_fatal, mil_surv, mil_rate);
+        fprintf(fp, "%-22s %-10d %-12lld %-12lld %-12lld %-10.2f\n",
+                "Commercial / Civil", civ_crashes, civ_aboard, civ_fatal, civ_surv, civ_rate);
         fclose(fp);
         printf("Saved sector comparison to sector_report.txt\n");
     }
 }
 
+/* Feature 9: Causal Factor Breakdown & cause_report.txt */
+void cause_report(const CrashRecord *records, size_t count) {
+    SummaryItem *causes = NULL;
+    size_t n_causes = 0, cap_causes = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        add_to_summary(&causes, &n_causes, &cap_causes, records[i].cause,
+                       records[i].fatalities, calc_survivors(&records[i]));
+    }
+    qsort(causes, n_causes, sizeof(SummaryItem), cmp_summary_desc);
+
+    FILE *fp = fopen("cause_report.txt", "w");
+    printf("\nCAUSAL FACTOR CLASSIFICATION SUMMARY\n");
+    printf("-------------------------------------------------------------\n");
+    if (fp) {
+        fprintf(fp, "CAUSAL FACTOR CLASSIFICATION SUMMARY\n");
+        fprintf(fp, "-------------------------------------------------------------\n");
+    }
+
+    for (size_t i = 0; i < n_causes; i++) {
+        double share = (count > 0) ? ((double)causes[i].crashes / (double)count) * 100.0 : 0.0;
+        printf("%-32.32s | %4d crashes (%5.2f%%) | %7lld fatalities\n",
+               causes[i].label, causes[i].crashes, share, causes[i].fatalities);
+        if (fp) {
+            fprintf(fp, "%-32.32s | %4d crashes (%5.2f%%) | %7lld fatalities\n",
+                    causes[i].label, causes[i].crashes, share, causes[i].fatalities);
+        }
+    }
+
+    if (fp) {
+        fclose(fp);
+        printf("Saved cause breakdown to cause_report.txt\n");
+    }
+    free(causes);
+}
+
 /* Feature 8: Export dashboard_data.json for the Web Frontend */
-void export_dashboard_json(const CrashRecord *records, size_t count) {
+void export_dashboard_json_ex(
+    const CrashRecord *records, size_t count,
+    int filter_active, int start_yr, int end_yr, int min_fatal,
+    const char *sector, const char *op_q, const char *ac_q, const char *loc_q
+) {
     FILE *jf = fopen("dashboard_data.json", "w");
     if (!jf) {
         perror("Failed to create dashboard_data.json");
         return;
     }
 
-    long long total_aboard = 0, total_fatal = 0;
+    long long total_aboard = 0, total_fatal = 0, total_surv = 0, total_ground = 0;
     size_t issues = 0;
     int zero_fatal_count = 0;
     int mil_crashes = 0, civ_crashes = 0;
     long long mil_aboard = 0, civ_aboard = 0;
     long long mil_fatal = 0, civ_fatal = 0;
+    long long mil_surv = 0, civ_surv = 0;
     int dec_crashes[13] = {0};
-    long long dec_aboard[13] = {0}, dec_fatal[13] = {0};
+    long long dec_aboard[13] = {0}, dec_fatal[13] = {0}, dec_surv[13] = {0};
 
-    SummaryItem *ops = NULL, *ac = NULL, *locs = NULL;
-    size_t n_ops = 0, cap_ops = 0, n_ac = 0, cap_ac = 0, n_loc = 0, cap_loc = 0;
+    SummaryItem *ops = NULL, *ac = NULL, *locs = NULL, *causes = NULL;
+    size_t n_ops = 0, cap_ops = 0, n_ac = 0, cap_ac = 0, n_loc = 0, cap_loc = 0, n_causes = 0, cap_causes = 0;
+
+    AnnualStat *annual = NULL;
+    size_t n_annual = 0, cap_annual = 0;
 
     for (size_t i = 0; i < count; i++) {
         const CrashRecord *r = &records[i];
-        if (r->aboard >= 0) total_aboard += r->aboard;
-        if (r->fatalities >= 0) total_fatal += r->fatalities;
+        int ab = (r->aboard >= 0) ? r->aboard : 0;
+        int ft = (r->fatalities >= 0) ? r->fatalities : 0;
+        int gr = (r->ground >= 0) ? r->ground : 0;
+        long long sv = calc_survivors(r);
+
+        total_aboard += ab;
+        total_fatal += ft;
+        total_surv += sv;
+        total_ground += gr;
         if (r->fatalities == 0 && r->aboard > 0) zero_fatal_count++;
 
         if (r->year < 0 || r->aboard < 0 || r->fatalities < 0 ||
@@ -691,29 +880,67 @@ void export_dashboard_json(const CrashRecord *records, size_t count) {
 
         if (is_military_operator(r->operator_name)) {
             mil_crashes++;
-            if (r->aboard >= 0) mil_aboard += r->aboard;
-            if (r->fatalities >= 0) mil_fatal += r->fatalities;
+            mil_aboard += ab;
+            mil_fatal += ft;
+            mil_surv += sv;
         } else {
             civ_crashes++;
-            if (r->aboard >= 0) civ_aboard += r->aboard;
-            if (r->fatalities >= 0) civ_fatal += r->fatalities;
+            civ_aboard += ab;
+            civ_fatal += ft;
+            civ_surv += sv;
         }
 
         if (r->year >= 1900 && r->year <= 2029) {
             int idx = (r->year - 1900) / 10;
             dec_crashes[idx]++;
-            if (r->aboard >= 0) dec_aboard[idx] += r->aboard;
-            if (r->fatalities >= 0) dec_fatal[idx] += r->fatalities;
+            dec_aboard[idx] += ab;
+            dec_fatal[idx] += ft;
+            dec_surv[idx] += sv;
+
+            int found = 0;
+            for (size_t y = 0; y < n_annual; y++) {
+                if (annual[y].year == r->year) {
+                    annual[y].crashes++;
+                    annual[y].aboard += ab;
+                    annual[y].fatalities += ft;
+                    annual[y].survivors += sv;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                if (n_annual == cap_annual) {
+                    size_t nc = (cap_annual == 0) ? 128 : cap_annual * 2;
+                    AnnualStat *tmp = realloc(annual, nc * sizeof(AnnualStat));
+                    if (tmp) {
+                        annual = tmp;
+                        cap_annual = nc;
+                    }
+                }
+                if (n_annual < cap_annual) {
+                    annual[n_annual].year = r->year;
+                    annual[n_annual].crashes = 1;
+                    annual[n_annual].aboard = ab;
+                    annual[n_annual].fatalities = ft;
+                    annual[n_annual].survivors = sv;
+                    n_annual++;
+                }
+            }
         }
 
-        add_to_summary(&ops, &n_ops, &cap_ops, r->operator_name, r->fatalities);
-        add_to_summary(&ac, &n_ac, &cap_ac, r->aircraft, r->fatalities);
-        add_to_summary(&locs, &n_loc, &cap_loc, r->location, r->fatalities);
+        add_to_summary(&ops, &n_ops, &cap_ops, r->operator_name, r->fatalities, sv);
+        add_to_summary(&ac, &n_ac, &cap_ac, r->aircraft, r->fatalities, sv);
+        add_to_summary(&locs, &n_loc, &cap_loc, r->location, r->fatalities, sv);
+        add_to_summary(&causes, &n_causes, &cap_causes, r->cause, r->fatalities, sv);
     }
 
     qsort(ops, n_ops, sizeof(SummaryItem), cmp_summary_desc);
     qsort(ac, n_ac, sizeof(SummaryItem), cmp_summary_desc);
     qsort(locs, n_loc, sizeof(SummaryItem), cmp_summary_desc);
+    qsort(causes, n_causes, sizeof(SummaryItem), cmp_summary_desc);
+    if (n_annual > 1) {
+        qsort(annual, n_annual, sizeof(AnnualStat), cmp_annual_asc);
+    }
 
     CrashRecord *sorted_fatal = NULL;
     if (count > 0) {
@@ -725,20 +952,40 @@ void export_dashboard_json(const CrashRecord *records, size_t count) {
     }
 
     double rate = (total_aboard > 0) ? ((double)total_fatal / (double)total_aboard) * 100.0 : 0.0;
+    char esc[400];
 
     fprintf(jf, "{\n");
+    fprintf(jf, "  \"filter\": {\n");
+    fprintf(jf, "    \"active\": %s,\n", filter_active ? "true" : "false");
+    fprintf(jf, "    \"start_year\": %d,\n", start_yr);
+    fprintf(jf, "    \"end_year\": %d,\n", end_yr);
+    fprintf(jf, "    \"min_fatalities\": %d,\n", min_fatal);
+    json_escape(sector ? sector : "all", esc, sizeof(esc));
+    fprintf(jf, "    \"sector\": \"%s\",\n", esc);
+    json_escape(op_q ? op_q : "", esc, sizeof(esc));
+    fprintf(jf, "    \"operator\": \"%s\",\n", esc);
+    json_escape(ac_q ? ac_q : "", esc, sizeof(esc));
+    fprintf(jf, "    \"aircraft\": \"%s\",\n", esc);
+    json_escape(loc_q ? loc_q : "", esc, sizeof(esc));
+    fprintf(jf, "    \"location\": \"%s\"\n", esc);
+    fprintf(jf, "  },\n");
+
     fprintf(jf, "  \"kpis\": {\n");
     fprintf(jf, "    \"total_records\": %zu,\n", count);
     fprintf(jf, "    \"total_aboard\": %lld,\n", total_aboard);
     fprintf(jf, "    \"total_fatalities\": %lld,\n", total_fatal);
+    fprintf(jf, "    \"total_survivors\": %lld,\n", total_surv);
+    fprintf(jf, "    \"total_ground\": %lld,\n", total_ground);
     fprintf(jf, "    \"fatality_rate\": %.2f,\n", rate);
     fprintf(jf, "    \"flagged_issues\": %zu,\n", issues);
     fprintf(jf, "    \"zero_fatality_crashes\": %d\n", zero_fatal_count);
     fprintf(jf, "  },\n");
 
     fprintf(jf, "  \"sectors\": {\n");
-    fprintf(jf, "    \"military\": { \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld },\n", mil_crashes, mil_aboard, mil_fatal);
-    fprintf(jf, "    \"civil\": { \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld }\n", civ_crashes, civ_aboard, civ_fatal);
+    fprintf(jf, "    \"military\": { \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld, \"survivors\": %lld },\n",
+            mil_crashes, mil_aboard, mil_fatal, mil_surv);
+    fprintf(jf, "    \"civil\": { \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld, \"survivors\": %lld }\n",
+            civ_crashes, civ_aboard, civ_fatal, civ_surv);
     fprintf(jf, "  },\n");
 
     fprintf(jf, "  \"decades\": [\n");
@@ -747,34 +994,50 @@ void export_dashboard_json(const CrashRecord *records, size_t count) {
         if (dec_crashes[i] > 0) {
             if (!first_dec) fprintf(jf, ",\n");
             first_dec = 0;
-            fprintf(jf, "    { \"decade\": \"%ds\", \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld }",
-                    1900 + i * 10, dec_crashes[i], dec_aboard[i], dec_fatal[i]);
+            fprintf(jf, "    { \"decade\": \"%ds\", \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld, \"survivors\": %lld }",
+                    1900 + i * 10, dec_crashes[i], dec_aboard[i], dec_fatal[i], dec_surv[i]);
         }
     }
     fprintf(jf, "\n  ],\n");
 
-    char esc[400];
+    fprintf(jf, "  \"annual\": [\n");
+    for (size_t i = 0; i < n_annual; i++) {
+        fprintf(jf, "    { \"year\": %d, \"crashes\": %d, \"aboard\": %lld, \"fatalities\": %lld, \"survivors\": %lld }%s\n",
+                annual[i].year, annual[i].crashes, annual[i].aboard, annual[i].fatalities, annual[i].survivors,
+                (i + 1 < n_annual) ? "," : "");
+    }
+    fprintf(jf, "  ],\n");
+
+    fprintf(jf, "  \"causes\": [\n");
+    for (size_t i = 0; i < n_causes; i++) {
+        json_escape(causes[i].label, esc, sizeof(esc));
+        fprintf(jf, "    { \"cause\": \"%s\", \"crashes\": %d, \"fatalities\": %lld, \"survivors\": %lld }%s\n",
+                esc, causes[i].crashes, causes[i].fatalities, causes[i].survivors,
+                (i + 1 < n_causes) ? "," : "");
+    }
+    fprintf(jf, "  ],\n");
+
     fprintf(jf, "  \"top_operators\": [\n");
     for (size_t i = 0; i < n_ops && i < 10; i++) {
         json_escape(ops[i].label, esc, sizeof(esc));
-        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld }%s\n",
-                esc, ops[i].crashes, ops[i].fatalities, (i + 1 < n_ops && i + 1 < 10) ? "," : "");
+        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld, \"survivors\": %lld }%s\n",
+                esc, ops[i].crashes, ops[i].fatalities, ops[i].survivors, (i + 1 < n_ops && i + 1 < 10) ? "," : "");
     }
     fprintf(jf, "  ],\n");
 
     fprintf(jf, "  \"top_aircraft\": [\n");
     for (size_t i = 0; i < n_ac && i < 10; i++) {
         json_escape(ac[i].label, esc, sizeof(esc));
-        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld }%s\n",
-                esc, ac[i].crashes, ac[i].fatalities, (i + 1 < n_ac && i + 1 < 10) ? "," : "");
+        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld, \"survivors\": %lld }%s\n",
+                esc, ac[i].crashes, ac[i].fatalities, ac[i].survivors, (i + 1 < n_ac && i + 1 < 10) ? "," : "");
     }
     fprintf(jf, "  ],\n");
 
     fprintf(jf, "  \"top_locations\": [\n");
     for (size_t i = 0; i < n_loc && i < 10; i++) {
         json_escape(locs[i].label, esc, sizeof(esc));
-        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld }%s\n",
-                esc, locs[i].crashes, locs[i].fatalities, (i + 1 < n_loc && i + 1 < 10) ? "," : "");
+        fprintf(jf, "    { \"name\": \"%s\", \"crashes\": %d, \"fatalities\": %lld, \"survivors\": %lld }%s\n",
+                esc, locs[i].crashes, locs[i].fatalities, locs[i].survivors, (i + 1 < n_loc && i + 1 < 10) ? "," : "");
     }
     fprintf(jf, "  ],\n");
 
@@ -785,9 +1048,9 @@ void export_dashboard_json(const CrashRecord *records, size_t count) {
             json_escape(sorted_fatal[i].operator_name, op_e, sizeof(op_e));
             json_escape(sorted_fatal[i].location, loc_e, sizeof(loc_e));
             json_escape(sorted_fatal[i].aircraft, ac_e, sizeof(ac_e));
-            fprintf(jf, "    { \"date\": \"%s\", \"operator\": \"%s\", \"aircraft\": \"%s\", \"location\": \"%s\", \"aboard\": %d, \"fatalities\": %d }%s\n",
+            fprintf(jf, "    { \"date\": \"%s\", \"operator\": \"%s\", \"aircraft\": \"%s\", \"location\": \"%s\", \"aboard\": %d, \"fatalities\": %d, \"survivors\": %lld }%s\n",
                     sorted_fatal[i].date, op_e, ac_e, loc_e,
-                    sorted_fatal[i].aboard, sorted_fatal[i].fatalities,
+                    sorted_fatal[i].aboard, sorted_fatal[i].fatalities, calc_survivors(&sorted_fatal[i]),
                     (i + 1 < count && i + 1 < 10) ? "," : "");
         }
     }
@@ -798,13 +1061,22 @@ void export_dashboard_json(const CrashRecord *records, size_t count) {
     free(ops);
     free(ac);
     free(locs);
+    free(causes);
+    free(annual);
     free(sorted_fatal);
     printf("Exported frontend dataset to dashboard_data.json\n");
 }
 
-static CrashRecord *build_filtered_subset(const CrashRecord *records, size_t count,
-                                          int start_yr, int end_yr, int min_fatal,
-                                          size_t *out_sub_count) {
+void export_dashboard_json(const CrashRecord *records, size_t count) {
+    export_dashboard_json_ex(records, count, 0, 1908, 2019, 0, "all", "", "", "");
+}
+
+static CrashRecord *build_filtered_subset_ex(
+    const CrashRecord *records, size_t count,
+    int start_yr, int end_yr, int min_fatal,
+    const char *sector, const char *op_q, const char *ac_q, const char *loc_q,
+    size_t *out_sub_count
+) {
     CrashRecord *sub = malloc((count > 0 ? count : 1) * sizeof(CrashRecord));
     if (!sub) return NULL;
     size_t n = 0;
@@ -812,6 +1084,11 @@ static CrashRecord *build_filtered_subset(const CrashRecord *records, size_t cou
         const CrashRecord *r = &records[i];
         if (r->year < start_yr || r->year > end_yr) continue;
         if (min_fatal > 0 && r->fatalities < min_fatal) continue;
+        if (sector && strcmp(sector, "military") == 0 && !is_military_operator(r->operator_name)) continue;
+        if (sector && strcmp(sector, "civil") == 0 && is_military_operator(r->operator_name)) continue;
+        if (op_q && op_q[0] != '\0' && !contains_case_insensitive(r->operator_name, op_q)) continue;
+        if (ac_q && ac_q[0] != '\0' && !contains_case_insensitive(r->aircraft, ac_q)) continue;
+        if (loc_q && loc_q[0] != '\0' && !contains_case_insensitive(r->location, loc_q)) continue;
         sub[n++] = *r;
     }
     *out_sub_count = n;
@@ -822,18 +1099,25 @@ int main(int argc, char **argv) {
     char filename[256] = "Airplane_Crashes_and_Fatalities_Since_1908_20190820105639.csv";
 
     /* Non-interactive CLI mode for the web frontend:
-       ./crash_studio --filter <start_yr> <end_yr> <min_fatal> */
-    if (argc == 5 && strcmp(argv[1], "--filter") == 0) {
+       ./crash_studio --filter <start_yr> <end_yr> <min_fatal> [sector] [operator] [aircraft] [location] */
+    if (argc >= 5 && strcmp(argv[1], "--filter") == 0) {
         int start_yr = atoi(argv[2]);
         int end_yr   = atoi(argv[3]);
         int min_fatal = atoi(argv[4]);
+        const char *sector = (argc >= 6 && argv[5][0]) ? argv[5] : "all";
+        const char *op_q   = (argc >= 7) ? argv[6] : "";
+        const char *ac_q   = (argc >= 8) ? argv[7] : "";
+        const char *loc_q  = (argc >= 9) ? argv[8] : "";
 
         size_t count = 0;
         CrashRecord *records = load_records(filename, &count);
         if (!records) return 1;
 
         size_t sub_count = 0;
-        CrashRecord *subset = build_filtered_subset(records, count, start_yr, end_yr, min_fatal, &sub_count);
+        CrashRecord *subset = build_filtered_subset_ex(
+            records, count, start_yr, end_yr, min_fatal,
+            sector, op_q, ac_q, loc_q, &sub_count
+        );
         if (!subset) {
             free(records);
             return 1;
@@ -854,9 +1138,10 @@ int main(int argc, char **argv) {
             fclose(out);
         }
 
-        export_dashboard_json(subset, sub_count);
-        printf("Filtered %zu records (%d-%d, min_fatal=%d)\n",
-               sub_count, start_yr, end_yr, min_fatal);
+        export_dashboard_json_ex(subset, sub_count, 1, start_yr, end_yr, min_fatal, sector, op_q, ac_q, loc_q);
+        cause_report(subset, sub_count);
+        printf("Filtered %zu records (%d-%d, min_fatal=%d, sector=%s)\n",
+               sub_count, start_yr, end_yr, min_fatal, sector);
 
         free(subset);
         free(records);
@@ -892,6 +1177,7 @@ int main(int argc, char **argv) {
         printf("6. Deadliest Crashes & 100%% Survival Spotlight\n");
         printf("7. Military vs. Commercial/Civil Breakdown\n");
         printf("8. Export JSON for Web Frontend (dashboard_data.json)\n");
+        printf("9. Causal Factor Breakdown (cause_report.txt)\n");
         printf("0. Exit\n");
         printf("Choice: ");
 
@@ -911,6 +1197,7 @@ int main(int argc, char **argv) {
             case 6: deadliest_and_survival_spotlight(records, count); break;
             case 7: military_vs_commercial(records, count); break;
             case 8: export_dashboard_json(records, count); break;
+            case 9: cause_report(records, count); break;
             case 0: printf("Exiting cleanly.\n"); break;
             default: printf("Invalid option.\n"); break;
         }
